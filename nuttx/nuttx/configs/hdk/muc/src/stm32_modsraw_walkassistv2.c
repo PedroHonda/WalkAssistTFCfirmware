@@ -130,12 +130,14 @@ static int adc_devinit(void)
 #endif
 }
 
-static void led_toggle(void)
+static uint8_t led_toggle(void)
 {
     uint8_t new_val;
 
     new_val = gpio_get_value(GPIO_MODS_LED_DRV_3) ^ 1;
     gpio_set_value(GPIO_MODS_LED_DRV_3, new_val);
+
+    return new_val;
 }
 
 
@@ -169,11 +171,32 @@ static int raw_send(struct device *dev, uint32_t len, uint8_t data[])
     return OK;
 }
 
-static void main_worker(void *arg)
-{
+static uint8_t readADC(void) {
     int ret;
     int adc_fd;
+    uint8_t command;
     struct adc_msg_s sample;
+
+    adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
+    if (adc_fd < 0)
+    {
+        dbg("open %s failed: %d\n", TEMP_RAW_ADC_DEVPATH, errno);
+    }
+    ret = ioctl(adc_fd, ANIOC_TRIGGER, 0);
+    if (ret < 0)
+    {
+        dbg("ANIOC_TRIGGER ioctl failed: %d\n", errno);
+    }
+    read(adc_fd, &sample, sizeof(sample));
+    close(adc_fd);
+    command = (int) sample.am_data;
+    return command;
+}
+static void main_worker(void *arg)
+{
+    //int ret;
+    //int adc_fd;
+    //struct adc_msg_s sample;
     struct temp_raw_info *info = NULL;
     info = arg;
 
@@ -181,7 +204,18 @@ static void main_worker(void *arg)
     if (!work_available(&data_report_work))
         work_cancel(LPWORK, &data_report_work);
 
-    adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
+    uint8_t command[2];
+    command[0] = 30+led_toggle();
+    command[1] = readADC();
+    /*float distance;
+    distance = 5000.0/(float)readADC();
+    if (distance>255) { 
+        command[1] = 255;
+    } else {
+        command[1] = (int)distance;
+    }*/
+    raw_send(info->gDevice, 2,command);
+    /*adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
     if (adc_fd < 0)
     {
         dbg("open %s failed: %d\n", TEMP_RAW_ADC_DEVPATH, errno);
@@ -200,15 +234,14 @@ static void main_worker(void *arg)
     } dist;
     dist.CMint = (int) sample.am_data;
     raw_send(info->gDevice, 2,dist.CMbyte);
-
+    led_toggle();*/
 
     /* schedule work */
     work_queue(LPWORK, &data_report_work,
                 main_worker, info, MSEC2TICK(500)); // 500 ms
-errout:
-    return;
+/*errout:
+    return;*/
 }
-
 static int walkassist_recv(struct device *dev, uint32_t len, uint8_t data[])
 {
     dbg("COMMAND!!\n");
@@ -221,11 +254,27 @@ static int walkassist_recv(struct device *dev, uint32_t len, uint8_t data[])
     
     if (len == 1) {
         dbg("HERE IT COMES!!\n");
-        led_toggle();
+        
+        uint8_t command[2];
+        command[0] = led_toggle();
+        command[1] = readADC();
+        raw_send(info->gDevice, 2,command);
+    }
+    if (len == 3) {
+        lldbg("Command Worker: %d %d %d\n", data[0], data[1], data[2]);
+        if (data[2] == 0 || data[2] == '0') {
+            if (!work_available(&data_report_work))
+                work_cancel(LPWORK, &data_report_work);
+        } else if (data[2] == 1 || data[2] == '1') {
+            if (!work_available(&data_report_work))
+                work_cancel(LPWORK, &data_report_work);
+            //  schedule work 
+            work_queue(LPWORK, &data_report_work,
+                        main_worker, info, 0);
+        }
     }
     if (len == 5) {
-	adc_devinit();
-        lldbg("Command Worker received!");
+        lldbg("Command Worker received!\n");
         if (data[0] == 0 || data[0] == '0') {
             if (!work_available(&data_report_work))
                 work_cancel(LPWORK, &data_report_work);
@@ -264,7 +313,7 @@ static int walkassist_register_callback(struct device *dev, raw_send_callback ca
 static int walkassist_unregister_callback(struct device *dev)
 {
     struct project_info *info = NULL;
-
+    
     if (!dev || !device_get_private(dev)) {
         return -ENODEV;
     }
@@ -284,7 +333,7 @@ static int walkassist_probe(struct device *dev)
     if (!dev) {
         return -EINVAL;
     }
-
+    adc_devinit();
     info = zalloc(sizeof(*info));
     if (!info) {
         return -ENOMEM;
