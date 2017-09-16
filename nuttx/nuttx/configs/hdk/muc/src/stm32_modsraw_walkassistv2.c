@@ -130,14 +130,13 @@ static int adc_devinit(void)
 #endif
 }
 
-static uint8_t led_toggle(void)
+static void led_toggle(void)
 {
     uint8_t new_val;
 
     new_val = gpio_get_value(GPIO_MODS_LED_DRV_3) ^ 1;
     gpio_set_value(GPIO_MODS_LED_DRV_3, new_val);
 
-    return new_val;
 }
 
 
@@ -171,10 +170,10 @@ static int raw_send(struct device *dev, uint32_t len, uint8_t data[])
     return OK;
 }
 
-static uint8_t readADC(void) {
+static int readADC(void) {
     int ret;
     int adc_fd;
-    uint8_t command;
+    int command;
     struct adc_msg_s sample;
 
     adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
@@ -190,6 +189,7 @@ static uint8_t readADC(void) {
     read(adc_fd, &sample, sizeof(sample));
     close(adc_fd);
     command = (int) sample.am_data;
+    //lldbg("1.%d\t2.:%d\n", command, sample.am_data);
     return command;
 }
 static void main_worker(void *arg)
@@ -203,10 +203,12 @@ static void main_worker(void *arg)
     /* cancel any work and reset ourselves */
     if (!work_available(&data_report_work))
         work_cancel(LPWORK, &data_report_work);
-
-    uint8_t command[2];
-    command[0] = 30+led_toggle();
-    command[1] = readADC();
+    led_toggle();
+    union {
+        int CMint;
+        uint8_t CMbyte[2];
+    } dist;
+    dist.CMint = readADC();
     /*float distance;
     distance = 5000.0/(float)readADC();
     if (distance>255) { 
@@ -214,7 +216,7 @@ static void main_worker(void *arg)
     } else {
         command[1] = (int)distance;
     }*/
-    raw_send(info->gDevice, 2,command);
+    raw_send(info->gDevice, 2, dist.CMbyte);
     /*adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
     if (adc_fd < 0)
     {
@@ -254,11 +256,13 @@ static int walkassist_recv(struct device *dev, uint32_t len, uint8_t data[])
     
     if (len == 1) {
         dbg("HERE IT COMES!!\n");
-        
-        uint8_t command[2];
-        command[0] = led_toggle();
-        command[1] = readADC();
-        raw_send(info->gDevice, 2,command);
+        led_toggle();
+        union {
+            int CMint;
+            uint8_t CMbyte[2];
+        } dist;
+        dist.CMint = readADC();
+        raw_send(info->gDevice, 2, dist.CMbyte);
     }
     if (len == 3) {
         lldbg("Command Worker: %d %d %d\n", data[0], data[1], data[2]);
