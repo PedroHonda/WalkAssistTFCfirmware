@@ -37,6 +37,8 @@
 #include <arch/byteorder.h>
 #include <arch/board/board.h>
 
+#include <time.h>
+
 #include <nuttx/arch.h>
 #include <nuttx/analog/adc.h>
 #include <nuttx/clock.h>
@@ -139,6 +141,15 @@ static void led_toggle(void)
 
 }
 
+static int security_sleep(int mi)
+{
+
+    struct timespec t10u, rem;
+    t10u.tv_sec = 0;
+    t10u.tv_nsec = mi*1000;
+    return nanosleep(&t10u, &rem);
+
+}
 
 static int raw_send(struct device *dev, uint32_t len, uint8_t data[])
 {
@@ -189,54 +200,55 @@ static int readADC(void) {
     read(adc_fd, &sample, sizeof(sample));
     close(adc_fd);
     command = (int) sample.am_data;
-    //lldbg("1.%d\t2.:%d\n", command, sample.am_data);
     return command;
 }
+
 static void main_worker(void *arg)
 {
-    //int ret;
-    //int adc_fd;
-    //struct adc_msg_s sample;
     struct temp_raw_info *info = NULL;
     info = arg;
 
     /* cancel any work and reset ourselves */
     if (!work_available(&data_report_work))
         work_cancel(LPWORK, &data_report_work);
-    led_toggle();
+    uint8_t sensorMSG[6];   // Message containing information about sensor measurements
     union {
         int CMint;
         uint8_t CMbyte[2];
     } dist;
+
+    /* SENSOR 1 */
+    gpio_set_value(GPIO_PI_CAM_GPIO1, 0);   // PA9
+    gpio_set_value(GPIO_PI_CAM_GPIO0, 1);   // PC9
+    security_sleep(5);
     dist.CMint = readADC();
-    /*float distance;
-    distance = 5000.0/(float)readADC();
-    if (distance>255) { 
-        command[1] = 255;
-    } else {
-        command[1] = (int)distance;
-    }*/
-    raw_send(info->gDevice, 2, dist.CMbyte);
-    /*adc_fd = open(TEMP_RAW_ADC_DEVPATH, O_RDONLY);
-    if (adc_fd < 0)
-    {
-        dbg("open %s failed: %d\n", TEMP_RAW_ADC_DEVPATH, errno);
-        goto errout;
-    }
-    ret = ioctl(adc_fd, ANIOC_TRIGGER, 0);
-    if (ret < 0)
-    {
-        dbg("ANIOC_TRIGGER ioctl failed: %d\n", errno);
-    }
-    read(adc_fd, &sample, sizeof(sample));
-    close(adc_fd);
-    union {
-        int CMint;
-        uint8_t CMbyte[1];
-    } dist;
-    dist.CMint = (int) sample.am_data;
-    raw_send(info->gDevice, 2,dist.CMbyte);
-    led_toggle();*/
+    gpio_set_value(GPIO_PI_CAM_GPIO1, 1);   // PA9
+    gpio_set_value(GPIO_PI_CAM_GPIO0, 0);   // PC9
+    sensorMSG[0] = dist.CMbyte[0];
+    sensorMSG[1] = dist.CMbyte[1];
+
+    /* SENSOR 2 */
+    gpio_set_value(GPIO_FACT_DISP_RST1_N, 0);    // PC8
+    gpio_set_value(GPIO_FACT_DISP_PWR1_EN, 1);    // PA10
+    security_sleep(5);
+    dist.CMint = readADC();
+    gpio_set_value(GPIO_FACT_DISP_RST1_N, 1);    // PC8
+    gpio_set_value(GPIO_FACT_DISP_PWR1_EN, 0);    // PA10
+    sensorMSG[2] = dist.CMbyte[0];
+    sensorMSG[3] = dist.CMbyte[1];
+
+    /* SENSOR 3 */
+    gpio_set_value(GPIO_FACT_DISP_PWR4_EN, 0);    // PA2
+    gpio_set_value(GPIO_FACT_DISP_PWR3_EN, 1);    // PA0
+    security_sleep(5);
+    dist.CMint = readADC();
+    gpio_set_value(GPIO_FACT_DISP_PWR4_EN, 1);    // PA2
+    gpio_set_value(GPIO_FACT_DISP_PWR3_EN, 0);    // PA0
+    sensorMSG[4] = dist.CMbyte[0];
+    sensorMSG[5] = dist.CMbyte[1];
+
+    /* Sending message */
+    raw_send(info->gDevice, 6, sensorMSG);
 
     /* schedule work */
     work_queue(LPWORK, &data_report_work,
@@ -246,16 +258,15 @@ static void main_worker(void *arg)
 }
 static int walkassist_recv(struct device *dev, uint32_t len, uint8_t data[])
 {
-    dbg("COMMAND!!\n");
+    dbg("Entering recv...\n");
     if (len == 0)
         return -EINVAL;
 
     struct temp_raw_info *info = NULL;
     info = device_get_private(dev);
-    /* Activate/Deactivate worker to auto-collect data */
     
     if (len == 1) {
-        dbg("HERE IT COMES!!\n");
+        dbg("cmd: Toggle - Collect data\n");
         led_toggle();
         union {
             int CMint;
@@ -264,25 +275,15 @@ static int walkassist_recv(struct device *dev, uint32_t len, uint8_t data[])
         dist.CMint = readADC();
         raw_send(info->gDevice, 2, dist.CMbyte);
     }
+    /* Activate/Deactivate worker to auto-collect data */
     if (len == 3) {
-        lldbg("Command Worker: %d %d %d\n", data[0], data[1], data[2]);
+
         if (data[2] == 0 || data[2] == '0') {
+            lldbg("cmd: Deactivate worker");
             if (!work_available(&data_report_work))
                 work_cancel(LPWORK, &data_report_work);
         } else if (data[2] == 1 || data[2] == '1') {
-            if (!work_available(&data_report_work))
-                work_cancel(LPWORK, &data_report_work);
-            //  schedule work 
-            work_queue(LPWORK, &data_report_work,
-                        main_worker, info, 0);
-        }
-    }
-    if (len == 5) {
-        lldbg("Command Worker received!\n");
-        if (data[0] == 0 || data[0] == '0') {
-            if (!work_available(&data_report_work))
-                work_cancel(LPWORK, &data_report_work);
-        } else if (data[0] == 1 || data[0] == '1') {
+            lldbg("cmd: Activate worker");
             if (!work_available(&data_report_work))
                 work_cancel(LPWORK, &data_report_work);
             //  schedule work 
@@ -329,11 +330,22 @@ static int walkassist_unregister_callback(struct device *dev)
 
 static int walkassist_probe(struct device *dev)
 {
-    gpio_direction_out(GPIO_CAM_DVDD_EN, 1);    // PA9
-    gpio_direction_in(GPIO_CAM_RST_N);          // PA5
+
+    /* SENSOR 1 */
+    gpio_direction_out(GPIO_PI_CAM_GPIO1, 1);    // PA9
+    gpio_direction_out(GPIO_PI_CAM_GPIO0, 0);    // PC9
+
+    /* SENSOR 2 */
+    gpio_direction_out(GPIO_FACT_DISP_RST1_N, 1);    // PC8
+    gpio_direction_out(GPIO_FACT_DISP_PWR1_EN, 0);    // PA10
+    
+    /* SENSOR 3 */
+    gpio_direction_out(GPIO_FACT_DISP_PWR4_EN, 1);    // PA2
+    gpio_direction_out(GPIO_FACT_DISP_PWR3_EN, 0);    // PA0
+    
     gpio_direction_out(GPIO_MODS_LED_DRV_3, LED_OFF);
     struct project_info *info;
-    dbg("PROOOOOOBE!!\n");
+    dbg("Entering probe...\n");
     if (!dev) {
         return -EINVAL;
     }
